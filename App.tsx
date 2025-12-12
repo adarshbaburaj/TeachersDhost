@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Layout } from './components/Layout';
 import { Button } from './components/Button';
-import { AppView, LessonPlanState, ImageSize } from './types';
+import { AppView, LessonPlanState, ImageSize, SavedLesson } from './types';
 import { generateNewLessonPlan, generateStyleMatchedPlan, generateVisualAid } from './services/geminiService';
+import { getSavedLessons, saveLessonToStorage, deleteLessonFromStorage } from './services/storageService';
 import { 
   Pencil, 
   Copy, 
@@ -12,8 +13,25 @@ import {
   Download, 
   Image as ImageIcon,
   CheckCircle,
-  ExternalLink
+  ExternalLink,
+  Save,
+  Library,
+  Trash2,
+  Share2,
+  Clipboard,
+  FileText,
+  Calendar,
+  Edit,
+  X,
+  Check
 } from 'lucide-react';
+
+const generateId = () => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return Date.now().toString(36) + Math.random().toString(36).substr(2);
+};
 
 const App: React.FC = () => {
   const [view, setView] = useState<AppView>(AppView.LANDING);
@@ -34,9 +52,21 @@ const App: React.FC = () => {
   const [visualAidSize, setVisualAidSize] = useState<ImageSize>('1K');
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
 
-  // Check API Key on mount
+  // State for My Lessons
+  const [savedLessons, setSavedLessons] = useState<SavedLesson[]>([]);
+  const [showShareOptions, setShowShareOptions] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState(false);
+  const [isSaved, setIsSaved] = useState(false);
+
+  // State for Editing
+  const [isEditing, setIsEditing] = useState(false);
+  const [editContent, setEditContent] = useState('');
+
+  // Check API Key on mount and load saved lessons
   useEffect(() => {
     const checkKey = async () => {
+      setSavedLessons(getSavedLessons());
+
       if (window.aistudio) {
         const hasKey = await window.aistudio.hasSelectedApiKey();
         if (hasKey) {
@@ -45,8 +75,6 @@ const App: React.FC = () => {
           setView(AppView.LANDING);
         }
       } else {
-        // Fallback for dev environments without the specific window object
-        // Assuming env var is present
         setView(AppView.HOME);
       }
     };
@@ -78,8 +106,11 @@ const App: React.FC = () => {
         subject,
         topic,
         content: text,
-        groundingUrls
+        groundingUrls,
+        dateCreated: Date.now()
       });
+      setIsSaved(false);
+      setIsEditing(false);
       setView(AppView.RESULT);
     } catch (e) {
       setError("Something went wrong while drafting the plan. Please try again.");
@@ -98,8 +129,11 @@ const App: React.FC = () => {
         topic: newTopic,
         content: text,
         sourceFile: file,
-        groundingUrls
+        groundingUrls,
+        dateCreated: Date.now()
       });
+      setIsSaved(false);
+      setIsEditing(false);
       setView(AppView.RESULT);
     } catch (e) {
       setError("Failed to analyze the file or generate the plan. Please ensure the file is readable.");
@@ -113,7 +147,6 @@ const App: React.FC = () => {
     setIsGeneratingImage(true);
     setError(null);
     
-    // Ensure key is selected (double check for Pro model requirements)
     if (window.aistudio) {
        const hasKey = await window.aistudio.hasSelectedApiKey();
        if (!hasKey) {
@@ -124,10 +157,117 @@ const App: React.FC = () => {
     try {
       const imageUrl = await generateVisualAid(result.content, visualAidSize);
       setResult(prev => prev ? { ...prev, generatedImageUrl: imageUrl } : null);
+      
+      // If the lesson is already saved, update it with the new image
+      if (isSaved && result.id) {
+          const updatedLesson: SavedLesson = {
+              id: result.id,
+              topic: result.topic,
+              grade: result.grade,
+              subject: result.subject,
+              content: result.content,
+              dateCreated: result.dateCreated || Date.now(),
+              groundingUrls: result.groundingUrls,
+              generatedImageUrl: imageUrl
+          };
+          const updatedList = saveLessonToStorage(updatedLesson);
+          setSavedLessons(updatedList);
+      }
     } catch (e) {
       setError("Visual aid generation failed. Please try again.");
     } finally {
       setIsGeneratingImage(false);
+    }
+  };
+
+  const handleSaveLesson = () => {
+    if (!result) return;
+    
+    const newId = result.id || generateId();
+    const lessonToSave: SavedLesson = {
+      id: newId,
+      topic: result.topic,
+      grade: result.grade,
+      subject: result.subject,
+      content: result.content,
+      dateCreated: result.dateCreated || Date.now(),
+      groundingUrls: result.groundingUrls,
+      generatedImageUrl: result.generatedImageUrl
+    };
+    
+    const updatedList = saveLessonToStorage(lessonToSave);
+    setSavedLessons(updatedList);
+    setResult(prev => prev ? { ...prev, id: newId } : null);
+    setIsSaved(true);
+  };
+
+  const handleDeleteLesson = (e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (window.confirm("Are you sure you want to delete this lesson?")) {
+        const updatedList = deleteLessonFromStorage(id);
+        setSavedLessons(updatedList);
+        // If we are currently viewing this lesson, go back to My Lessons
+        if (view === AppView.RESULT && result?.id === id) {
+            setView(AppView.MY_LESSONS);
+        }
+    }
+  };
+
+  const handleViewSavedLesson = (lesson: SavedLesson) => {
+    setResult({
+        id: lesson.id,
+        topic: lesson.topic,
+        grade: lesson.grade,
+        subject: lesson.subject,
+        content: lesson.content,
+        dateCreated: lesson.dateCreated,
+        groundingUrls: lesson.groundingUrls,
+        generatedImageUrl: lesson.generatedImageUrl
+    });
+    setIsSaved(true);
+    setIsEditing(false);
+    setView(AppView.RESULT);
+  };
+
+  const handleStartEditing = () => {
+    if (result) {
+      setEditContent(result.content);
+      setIsEditing(true);
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setIsEditing(false);
+  };
+
+  const handleSaveEdit = () => {
+    if (result) {
+      setResult({ ...result, content: editContent });
+      setIsEditing(false);
+      setIsSaved(false); // Mark as unsaved because content changed
+    }
+  };
+
+  const handleCopyToClipboard = () => {
+    if (result?.content) {
+      navigator.clipboard.writeText(result.content);
+      setCopyFeedback(true);
+      setTimeout(() => setCopyFeedback(false), 2000);
+      setShowShareOptions(false);
+    }
+  };
+
+  const handleDownloadTxt = () => {
+    if (result?.content) {
+      const element = document.createElement("a");
+      const file = new Blob([result.content], { type: 'text/plain' });
+      element.href = URL.createObjectURL(file);
+      element.download = `${result.topic.replace(/\s+/g, '-').toLowerCase()}-lesson-plan.txt`;
+      document.body.appendChild(element);
+      element.click();
+      document.body.removeChild(element);
+      setShowShareOptions(false);
     }
   };
 
@@ -138,6 +278,8 @@ const App: React.FC = () => {
     setNewTopic('');
     setFile(null);
     setError(null);
+    setIsSaved(false);
+    setIsEditing(false);
     setView(AppView.HOME);
   };
 
@@ -167,7 +309,11 @@ const App: React.FC = () => {
   }
 
   return (
-    <Layout onHomeClick={resetForm}>
+    <Layout 
+        onHomeClick={resetForm} 
+        onMyLessonsClick={() => setView(AppView.MY_LESSONS)}
+        currentPage={view === AppView.RESULT ? (isSaved ? 'MY_LESSONS' : 'HOME') : view}
+    >
       {/* HOME VIEW */}
       {view === AppView.HOME && (
         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -238,7 +384,7 @@ const App: React.FC = () => {
               <select 
                 value={grade}
                 onChange={(e) => setGrade(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-brand-500 focus:ring-4 focus:ring-brand-50 bg-white transition-all outline-none"
+                className="w-full px-4 py-3 rounded-xl border border-slate-600 bg-slate-800 text-white focus:border-brand-500 focus:ring-4 focus:ring-brand-500/30 transition-all outline-none"
               >
                 {['Kindergarten', '1st Grade', '2nd Grade', '3rd Grade', '4th Grade', '5th Grade', '6th Grade', '7th Grade', '8th Grade', 'High School'].map(g => (
                   <option key={g} value={g}>{g}</option>
@@ -253,7 +399,7 @@ const App: React.FC = () => {
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
                 placeholder="e.g. Life Science, Ancient History"
-                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-brand-500 focus:ring-4 focus:ring-brand-50 transition-all outline-none"
+                className="w-full px-4 py-3 rounded-xl border border-slate-600 bg-slate-800 text-white placeholder-slate-400 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/30 transition-all outline-none"
               />
             </div>
 
@@ -264,7 +410,7 @@ const App: React.FC = () => {
                 value={topic}
                 onChange={(e) => setTopic(e.target.value)}
                 placeholder="e.g. Photosynthesis, The Roman Empire"
-                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-brand-500 focus:ring-4 focus:ring-brand-50 transition-all outline-none"
+                className="w-full px-4 py-3 rounded-xl border border-slate-600 bg-slate-800 text-white placeholder-slate-400 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/30 transition-all outline-none"
               />
             </div>
 
@@ -330,7 +476,7 @@ const App: React.FC = () => {
                 value={newTopic}
                 onChange={(e) => setNewTopic(e.target.value)}
                 placeholder="e.g. Gravity, Creative Writing"
-                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-50 transition-all outline-none"
+                className="w-full px-4 py-3 rounded-xl border border-slate-600 bg-slate-800 text-white placeholder-slate-400 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/30 transition-all outline-none"
               />
               <p className="mt-2 text-xs text-slate-400">
                 I'll write a lesson on this topic using the format of the file above.
@@ -356,12 +502,167 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {/* MY LESSONS VIEW */}
+      {view === AppView.MY_LESSONS && (
+        <div className="max-w-4xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-300">
+          <div className="flex items-center justify-between mb-8">
+             <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center">
+                <Library size={24} />
+              </div>
+              <h2 className="text-2xl font-bold text-slate-800">My Lessons</h2>
+            </div>
+            <Button onClick={() => setView(AppView.CREATE_NEW)}>
+              <Pencil size={18} /> New Draft
+            </Button>
+          </div>
+
+          {savedLessons.length === 0 ? (
+            <div className="text-center py-16 bg-white rounded-3xl border border-slate-100 shadow-sm">
+              <div className="w-16 h-16 bg-slate-50 text-slate-300 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Library size={32} />
+              </div>
+              <h3 className="text-lg font-semibold text-slate-800 mb-2">No saved lessons yet</h3>
+              <p className="text-slate-500 mb-6 max-w-sm mx-auto">
+                Drafts you save will appear here. Start by creating a new lesson plan!
+              </p>
+              <Button onClick={() => setView(AppView.HOME)} variant="outline">
+                Back to Home
+              </Button>
+            </div>
+          ) : (
+            <div className="grid md:grid-cols-2 gap-4">
+              {savedLessons.map(lesson => (
+                <div 
+                  key={lesson.id}
+                  onClick={() => handleViewSavedLesson(lesson)}
+                  className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 hover:border-brand-300 hover:shadow-md transition-all cursor-pointer group relative"
+                >
+                  <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+                     <button 
+                       type="button"
+                       onClick={(e) => handleDeleteLesson(e, lesson.id)}
+                       className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors bg-white shadow-sm border border-slate-100"
+                       title="Delete Lesson"
+                     >
+                       <Trash2 size={16} />
+                     </button>
+                  </div>
+
+                  <div className="mb-4">
+                    <h3 className="text-xl font-bold text-slate-800 mb-1 line-clamp-1">{lesson.topic}</h3>
+                    <div className="flex items-center gap-2 text-sm text-slate-500">
+                       {lesson.grade && <span className="bg-slate-100 px-2 py-0.5 rounded text-xs font-medium text-slate-600">{lesson.grade}</span>}
+                       {lesson.subject && <span>• {lesson.subject}</span>}
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-center justify-between text-xs text-slate-400 mt-4 pt-4 border-t border-slate-100">
+                    <div className="flex items-center gap-1">
+                      <Calendar size={12} />
+                      {new Date(lesson.dateCreated).toLocaleDateString()}
+                    </div>
+                    {lesson.generatedImageUrl && (
+                      <div className="flex items-center gap-1 text-indigo-500">
+                        <ImageIcon size={12} />
+                        Visual Included
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* RESULT VIEW */}
       {view === AppView.RESULT && result && (
         <div className="max-w-4xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <button onClick={() => setView(AppView.HOME)} className="text-slate-400 hover:text-slate-600 flex items-center gap-1 mb-6 text-sm font-medium">
-            <ArrowLeft size={16} /> Start Over
-          </button>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+             <button onClick={() => setView(AppView.HOME)} className="text-slate-400 hover:text-slate-600 flex items-center gap-1 text-sm font-medium">
+               <ArrowLeft size={16} /> {isSaved ? 'Back to Home' : 'Start Over'}
+             </button>
+             
+             <div className="flex items-center gap-2">
+                {isEditing ? (
+                  <>
+                    <Button 
+                      onClick={handleCancelEdit} 
+                      variant="outline" 
+                      className="!px-4 !py-2 !text-sm"
+                    >
+                      <X size={16} /> Cancel
+                    </Button>
+                    <Button 
+                      onClick={handleSaveEdit} 
+                      className="!px-4 !py-2 !text-sm"
+                    >
+                      <Check size={16} /> Save Changes
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      onClick={handleStartEditing}
+                      variant="outline"
+                      className="!px-4 !py-2 !text-sm"
+                    >
+                      <Edit size={16} /> Edit
+                    </Button>
+                    
+                    <div className="relative">
+                      <Button 
+                        variant="outline" 
+                        className="!px-4 !py-2 !text-sm"
+                        onClick={() => setShowShareOptions(!showShareOptions)}
+                      >
+                        <Share2 size={16} /> Share
+                      </Button>
+                      
+                      {showShareOptions && (
+                        <div className="absolute right-0 top-full mt-2 w-48 bg-white rounded-xl shadow-lg border border-slate-100 p-2 z-20 animate-in fade-in zoom-in-95 duration-200">
+                          <button 
+                            onClick={handleCopyToClipboard}
+                            className="w-full flex items-center gap-3 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 rounded-lg transition-colors"
+                          >
+                            <Clipboard size={16} className="text-slate-400" />
+                            {copyFeedback ? 'Copied!' : 'Copy to Clipboard'}
+                          </button>
+                          <button 
+                            onClick={handleDownloadTxt}
+                            className="w-full flex items-center gap-3 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 rounded-lg transition-colors"
+                          >
+                            <FileText size={16} className="text-slate-400" />
+                            Download .txt
+                          </button>
+                        </div>
+                      )}
+                      {showShareOptions && (
+                        <div className="fixed inset-0 z-10" onClick={() => setShowShareOptions(false)}></div>
+                      )}
+                    </div>
+
+                    <Button 
+                      onClick={handleSaveLesson} 
+                      variant={isSaved ? "secondary" : "primary"}
+                      className="!px-4 !py-2 !text-sm"
+                      disabled={isSaved}
+                    >
+                      {isSaved ? (
+                        <>
+                          <CheckCircle size={16} /> Saved
+                        </>
+                      ) : (
+                        <>
+                          <Save size={16} /> Save Lesson
+                        </>
+                      )}
+                    </Button>
+                  </>
+                )}
+             </div>
+          </div>
 
           <div className="grid lg:grid-cols-3 gap-8">
             {/* Main Content (Left 2/3) */}
@@ -374,12 +675,21 @@ const App: React.FC = () => {
                    </div>
                  </div>
                  
-                 <div className="prose prose-slate max-w-none text-slate-600">
-                   {/* Simple rendering preserving whitespace/newlines for structure */}
-                   <div className="whitespace-pre-wrap font-sans leading-relaxed">
-                     {result.content}
+                 {isEditing ? (
+                   <textarea
+                     value={editContent}
+                     onChange={(e) => setEditContent(e.target.value)}
+                     className="w-full min-h-[500px] p-4 rounded-xl border border-slate-200 font-sans leading-relaxed focus:border-brand-500 focus:ring-4 focus:ring-brand-50 outline-none resize-none text-slate-600"
+                     placeholder="Edit your lesson plan here..."
+                   />
+                 ) : (
+                   <div className="prose prose-slate max-w-none text-slate-600">
+                     {/* Simple rendering preserving whitespace/newlines for structure */}
+                     <div className="whitespace-pre-wrap font-sans leading-relaxed">
+                       {result.content}
+                     </div>
                    </div>
-                 </div>
+                 )}
 
                  {/* Grounding Sources */}
                  {result.groundingUrls && result.groundingUrls.length > 0 && (
